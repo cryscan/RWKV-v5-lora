@@ -27,6 +27,13 @@ LORA_CONFIG = {
     "parts": {"att", "ln", "time"},
 }
 
+# controlnet-config
+CONTROLNET_CONFIG = {
+    "n": 0, # input dim
+    "r": 0, # hidden dim
+    "dropout": 0,
+}
+
 try:
     print('RWKV_MY_TESTING', os.environ["RWKV_MY_TESTING"])
 except:
@@ -141,6 +148,31 @@ def make_linear_ffn(*args, **kwargs):
         return LoraLinear(*args, **kwargs)
     else:
         return nn.Linear(*args, **kwargs)
+
+########################################################################################################
+
+class ControlNetBlock(nn.Module):
+    def __init__(self, in_features: int, out_features:int):
+        super().__init__()
+        
+        dropout = CONTROLNET_CONFIG['dropout']
+        r = CONTROLNET_CONFIG['r']
+        self.dropout = nn.Dropout(dropout)
+
+        self.k = nn.Parameter(torch.empty((r, in_features), device="cuda", dtype=torch.bfloat16))
+        self.v = nn.Parameter(torch.empty((out_features, r), device="cuda", dtype=torch.bfloat16))
+
+        nn.init.orthogonal_(self.k)
+        nn.init.zeros_(self.v)
+
+        self.cn_ln = nn.LayerNorm(in_features, device="cuda", dtype=torch.bfloat16)
+
+    def forward(self, x):
+        x = self.cn_ln(x)
+        x = self.dropout(x)
+        k = F.linear(x, self.k)
+        k = F.relu(k) ** 2
+        return F.linear(k, self.v)
 
 ########################################################################################################
 
@@ -327,7 +359,11 @@ class Block(nn.Module):
             self.drop0 = nn.Dropout(p = args.dropout)
             self.drop1 = nn.Dropout(p = args.dropout)
         
-    def forward(self, x, x_emb=None):
+        if  args.controlnet:
+            self.cn_att = ControlNetBlock(args.n_embd, args.n_embd)
+            self.cn_ffn = ControlNetBlock(args.n_embd, args.n_embd)
+        
+    def forward(self, x, x_emb=None, xc=None):
         args = self.args
         B, T, C = x.size()
         if self.layer_id == 0:
@@ -337,16 +373,24 @@ class Block(nn.Module):
                 x = x + pos_emb
 
         if self.args.dropout == 0:
+            if xc:
+                xc = xc + self.cn_att(x)
             if self.layer_id == 0 and args.pre_ffn > 0:
                 x = x + self.ffnPre(self.ln1(x))
             else:
                 x = x + self.att(self.ln1(x))
+            if xc:
+                xc = xc + self.cn_ffn(x)
             x = x + self.ffn(self.ln2(x))
         else:
+            if xc:
+                xc = xc + self.cn_att(x)
             if self.layer_id == 0 and args.pre_ffn > 0:
                 x = self.drop0(x + self.ffnPre(self.ln1(x)))
             else:
                 x = self.drop0(x + self.att(self.ln1(x)))
+            if xc:
+                xc = xc + self.cn_ffn(x)
             x = self.drop1(x + self.ffn(self.ln2(x)))
 
         if args.tiny_att_dim > 0 and self.layer_id == args.tiny_att_layer:
@@ -356,7 +400,7 @@ class Block(nn.Module):
             c = (q @ k.transpose(-2, -1)) * (args.tiny_att_dim ** (-0.5))
             c = c.masked_fill(self.tiny_mask[:T, :T] == 0, 0)
             x = x + c @ self.tiny_v(x_emb)
-        return x
+        return x, xc
 
 
 class L2Wrap(torch.autograd.Function):
@@ -495,22 +539,22 @@ class RWKV(pl.LightningModule):
             for block in self.blocks:
                 if args.grad_cp == 1:
                     if args.lora:
-                        x = torch_checkpoint(block, x, x_emb, use_reentrant=False)
+                        x, xc = torch_checkpoint(block, x, x_emb, xc, use_reentrant=False)
                     else:
-                        x = deepspeed.checkpointing.checkpoint(block, x, x_emb)
+                        x ,xc = deepspeed.checkpointing.checkpoint(block, x, x_emb, xc)
                 else:
-                    x = block(x, x_emb)
+                    x, xc = block(x, x_emb, xc)
         else:
             for block in self.blocks:
                 if args.grad_cp == 1:
                     if args.lora:
-                        x = torch_checkpoint(block, x, x_emb ,use_reentrant=False)
+                        x, xc = torch_checkpoint(block, x, x_emb, xc, use_reentrant=False)
                     else:
-                        x = deepspeed.checkpointing.checkpoint(block, x)
+                        x, xc = deepspeed.checkpointing.checkpoint(block, x, xc)
                 else:
-                    x = block(x)
+                    x, xc = block(x, x_emb, xc)
 
-        x = self.ln_out(x)
+        x = self.ln_out(x + xc)
 
         if args.head_qk > 0:
             q = self.head_q(x)[:, :T, :]

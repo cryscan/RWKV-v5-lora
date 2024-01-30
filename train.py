@@ -73,7 +73,7 @@ if __name__ == "__main__":
     parser.add_argument("--my_exit", default=99999999, type=int)
     parser.add_argument("--my_exit_tokens", default=0, type=int)
 
-    #LORA
+    # LORA
     parser.add_argument("--emb", action="store_true")
     parser.add_argument("--lora", action="store_true")
     parser.add_argument("--lora_load", default="", type=str)
@@ -81,6 +81,12 @@ if __name__ == "__main__":
     parser.add_argument("--lora_alpha", default=32, type=float)
     parser.add_argument("--lora_dropout", default=0.01, type=float)
     parser.add_argument("--lora_parts", default="att,ln,time", type=str)
+
+    # CONTROLNET
+    parser.add_argument("--controlnet", action="store_true")
+    parser.add_argument("--controlnet_d", default=64, type=int)
+    parser.add_argument("--controlnet_r", default=1024, type=int)
+    parser.add_argument("--controlnet_dropout", default=0.01, type=float)
 
     if pl.__version__[0]=='2':
         parser.add_argument("--accelerator", default="gpu", type=str)
@@ -254,7 +260,7 @@ if __name__ == "__main__":
     train_data = MyDataset(args)
     args.vocab_size = train_data.vocab_size
 
-    from src.model import RWKV, LORA_CONFIG, LoraLinear
+    from src.model import RWKV, LORA_CONFIG, CONTROLNET_CONFIG, LoraLinear
     if args.lora:
         assert args.lora_r > 0, "LoRA should have its `r` > 0"
         LORA_CONFIG["r"] = args.lora_r
@@ -263,12 +269,15 @@ if __name__ == "__main__":
         LORA_CONFIG["parts"] = set(str(args.lora_parts).split(','))
         enable_time_finetune = 'time' in LORA_CONFIG["parts"]
         enable_ln_finetune = 'ln' in LORA_CONFIG["parts"]
+    if args.controlnet:
+        CONTROLNET_CONFIG['n'] = args.controlnet_n
+        CONTROLNET_CONFIG['r'] = args.controlnet_r
+        CONTROLNET_CONFIG['dropout'] = args.controlnet_dropout
     model = RWKV(args)
     # only train lora parameters
     if args.lora:
         model.requires_grad_(False)
         for name, module in model.named_modules():
-           
             if any(n.startswith("lora_") for n, _ in module.named_parameters()):
                 print(f'  LoRA additionally training module {name}')
                 for pname, param in module.named_parameters():
@@ -282,6 +291,13 @@ if __name__ == "__main__":
                     if pname.startswith("time"):
                         print(f'  LoRA additionally training parameter {pname}')
                         param.requires_grad = True
+    if args.controlnet:
+        model.requires_grad_(False)
+        for name, module in model.named_modules():
+            if any(n.startswith("cn_") for n, _ in module.named_parameters()):
+                print(f'  ControlNet additionally training module {name}')
+                for param in module.parameters():
+                    param.requires_grad = True
 
     if len(args.load_model) == 0 or args.my_pile_stage == 1:  # shall we build the initial weights?
         init_weight_name = f"{args.proj_dir}/rwkv-init.pth"
