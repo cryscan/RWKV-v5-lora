@@ -162,7 +162,7 @@ class ControlNetBlock(nn.Module):
         self.k = nn.Parameter(torch.empty((r, in_features), device="cuda", dtype=torch.bfloat16))
         self.v = nn.Parameter(torch.empty((out_features, r), device="cuda", dtype=torch.bfloat16))
 
-        nn.init.orthogonal_(self.k)
+        nn.init.kaiming_uniform_(self.k, a=math.sqrt(5))
         nn.init.zeros_(self.v)
 
         self.cn_ln = nn.LayerNorm(in_features, device="cuda", dtype=torch.bfloat16)

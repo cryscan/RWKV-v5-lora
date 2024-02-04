@@ -270,7 +270,6 @@ if __name__ == "__main__":
         enable_time_finetune = 'time' in LORA_CONFIG["parts"]
         enable_ln_finetune = 'ln' in LORA_CONFIG["parts"]
     if args.controlnet:
-        CONTROLNET_CONFIG['n'] = args.controlnet_n
         CONTROLNET_CONFIG['r'] = args.controlnet_r
         CONTROLNET_CONFIG['dropout'] = args.controlnet_dropout
     model = RWKV(args)
